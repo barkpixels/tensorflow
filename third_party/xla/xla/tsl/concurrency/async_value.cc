@@ -21,6 +21,7 @@ limitations under the License.
 #include <limits>
 #include <utility>
 
+#include "absl/base/optimization.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/any_invocable.h"
 #include "absl/synchronization/blocking_counter.h"
@@ -167,8 +168,9 @@ void IndirectAsyncValue::ForwardTo(RCReference<AsyncValue> value) {
       indirect_value->DropRef();
     }
     // If indirect async value was created for any particular type id, check
-    // that forwarded to value has exactly the same type id.
-    DCHECK(type_id_ == kUnknownTypeId || type_id_ == concrete_value->type_id_)
+    // that forwarded to value has exactly the same type id or an error.
+    DCHECK(type_id_ == kUnknownTypeId || type_id_ == concrete_value->type_id_ ||
+           concrete_value->IsType<DummyValueForErrorAsyncValue>())
         << "IndirectAsyncValue::ForwardTo value has an unexpected type id";
     value_ = concrete_value;
     type_id_ = concrete_value->type_id_;
@@ -186,6 +188,8 @@ void IndirectAsyncValue::ForwardTo(RCReference<AsyncValue> value) {
 //===----------------------------------------------------------------------===//
 
 void BlockUntilReady(AsyncValue* async_value) {
+  if (ABSL_PREDICT_TRUE(async_value->IsAvailable())) return;
+
   absl::BlockingCounter cnt(1);
   async_value->AndThen([&] { cnt.DecrementCount(); });
   cnt.Wait();

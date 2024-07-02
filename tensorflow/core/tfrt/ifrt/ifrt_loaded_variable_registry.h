@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <string>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/functional/any_invocable.h"
@@ -54,7 +55,7 @@ class IfrtLoadedVariableRegistry {
   };
 
   struct LoadedVariable {
-    xla::ifrt::Future<absl::StatusOr<tsl::RCReference<xla::ifrt::Array>>> array;
+    xla::ifrt::Future<tsl::RCReference<xla::ifrt::Array>> array;
   };
   using LoadedVariableConstructor =
       absl::AnyInvocable<absl::StatusOr<LoadedVariable>() const>;

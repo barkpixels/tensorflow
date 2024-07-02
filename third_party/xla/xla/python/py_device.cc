@@ -50,8 +50,8 @@ limitations under the License.
 #include "xla/python/types.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/framework/allocator.h"
 #include "xla/util.h"
-#include "tsl/framework/allocator.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/statusor.h"
 
@@ -86,10 +86,10 @@ std::string_view PyDevice::device_kind() const { return device_->Kind(); }
 std::optional<int> PyDevice::local_hardware_id() const {
   // TODO(phawkins): consider supporting this for non-PJRT devices.
   ifrt::PjRtDevice* device = llvm::dyn_cast<ifrt::PjRtDevice>(device_);
-  if (device == nullptr) {
+  if (device == nullptr || !device->IsAddressable()) {
     return std::nullopt;
   }
-  int local_hardware_id = device->pjrt_device()->local_hardware_id();
+  int local_hardware_id = device->pjrt_device()->local_hardware_id().value();
   if (local_hardware_id == -1) {
     return std::nullopt;
   }
@@ -190,9 +190,9 @@ nb::list PyDevice::AddressableMemories() const {
 absl::StatusOr<std::optional<nb::dict>> PyDevice::MemoryStats() const {
   GlobalPyRefManager()->CollectGarbage();
   ifrt::PjRtDevice* device = llvm::dyn_cast<ifrt::PjRtDevice>(device_);
-  if (device == nullptr) {
+  if (device == nullptr || !device->IsAddressable()) {
     return xla::InvalidArgument(
-        "MemoryStats is only supported for PjRt devices.");
+        "MemoryStats is only supported for addressable PjRt devices.");
   }
   absl::StatusOr<tsl::AllocatorStats> maybe_stats =
       device->pjrt_device()->GetAllocatorStats();
@@ -228,9 +228,10 @@ absl::StatusOr<std::optional<nb::dict>> PyDevice::MemoryStats() const {
 absl::StatusOr<std::intptr_t> PyDevice::GetStreamForExternalReadyEvents()
     const {
   ifrt::PjRtDevice* device = llvm::dyn_cast<ifrt::PjRtDevice>(device_);
-  if (device == nullptr) {
+  if (device == nullptr || !device->IsAddressable()) {
     return xla::InvalidArgument(
-        "GetStreamForExternalReadyEvents is only supported for PjRt devices.");
+        "GetStreamForExternalReadyEvents is only supported for addressable "
+        "PjRt devices.");
   }
   return device->pjrt_device()->GetStreamForExternalReadyEvents();
 }
@@ -296,6 +297,7 @@ PyType_Slot PyDevice::slots_[] = {
       .def("live_buffers",
            [](nb::handle device) {
              PythonDeprecationWarning(
+                 /*stacklevel=*/1,
                  "Per device live_buffers() is deprecated. Please "
                  "use the jax.live_arrays() for jax.Arrays instead.");
              return nb::list();
@@ -320,11 +322,11 @@ PyType_Slot PyDevice::slots_[] = {
         try {
           auto device = nb::cast<PyDevice*>(nb::handle(self));
           auto name = nb::cast<std::string_view>(nb::handle(key));
-          const auto& attrs = device->device_->Attributes();
+          const auto& attrs = device->device_->Attributes().map();
           auto it = attrs.find(name);
           if (it != attrs.end()) {
-            auto result =
-                std::visit([](auto&& v) { return nb::cast(v); }, it->second);
+            auto result = std::visit([](auto&& v) { return nb::cast(v.value); },
+                                     it->second);
             return result.release().ptr();
           }
           PyErr_SetNone(PyExc_AttributeError);

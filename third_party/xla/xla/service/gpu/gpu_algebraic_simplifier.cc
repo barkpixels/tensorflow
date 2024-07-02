@@ -15,9 +15,12 @@ limitations under the License.
 
 #include "xla/service/gpu/gpu_algebraic_simplifier.h"
 
+#include "absl/log/check.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/service/gpu/matmul_utils.h"
+#include "xla/service/gpu/triton_support.h"
 #include "xla/xla_data.pb.h"
 
 namespace xla::gpu {
@@ -44,7 +47,20 @@ bool GpuAlgebraicSimplifierVisitor::ShouldStrengthReduceDotToReduce(
                         rhs->shape().rank());
   // Strength-reduce vector-vector dots since they are not supported by
   // GemmFusion.
-  return lhs_is_vector && rhs_is_vector;
+  if (lhs_is_vector && rhs_is_vector) {
+    return true;
+  }
+
+  absl::StatusOr<bool> is_too_small =
+      IsMatrixMultiplicationTooSmallForRewriting(*hlo, /*threshold=*/1000000);
+  CHECK_OK(is_too_small.status());
+  if (is_too_small.value()) {
+    return true;
+  }
+
+  // If GemmFusion cannot handle this dot, we should strength-reduce it so that
+  // it can be handled by the fusion pipeline.
+  return !legacy_triton::CanTritonHandleGEMM(*dot, compute_capability_);
 }
 
 }  // namespace xla::gpu

@@ -22,6 +22,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "flatbuffers/buffer.h"  // from @flatbuffers
 #include "flatbuffers/flatbuffer_builder.h"  // from @flatbuffers
@@ -45,17 +46,15 @@ limitations under the License.
 #include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "stablehlo/dialect/StablehloOps.h"  // from @stablehlo
 #include "stablehlo/dialect/VhloOps.h"  // from @stablehlo
+#include "tensorflow/compiler/mlir/lite/core/c/builtin_op_data.h"
 #include "tensorflow/compiler/mlir/lite/ir/tfl_ops.h"
+#include "tensorflow/compiler/mlir/lite/schema/mutable/schema_generated.h"
+#include "tensorflow/compiler/mlir/lite/schema/schema_utils.h"
 #include "tensorflow/compiler/mlir/lite/utils/convert_type.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_types.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/dynamic_shape_utils.h"
-#include "xla/statusor.h"
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/status.h"
-#include "tensorflow/lite/core/c/builtin_op_data.h"
-#include "tensorflow/lite/kernels/internal/kernel_utils.h"
-#include "tensorflow/lite/schema/mutable/schema_generated.h"
-#include "tensorflow/lite/schema/schema_utils.h"
 #include "tsl/platform/status.h"
 
 namespace {
@@ -309,11 +308,13 @@ static mlir::Attribute BuildVhloDictionaryV1Attr(
   return mlir::vhlo::DictionaryV1Attr::get(builder.getContext(), value);
 }
 
-static mlir::Attribute BuildVhloFloatV1Attr(::llvm::APFloat value,
-                                            mlir::Type type,
+static mlir::Attribute BuildVhloFloatV1Attr(float value,
                                             mlir::Builder builder) {
-  return mlir::vhlo::FloatV1Attr::get(builder.getContext(), type,
-                                      std::move(value));
+  mlir::StablehloVhloTypeConverter type_converter;
+  auto vhlo_type =
+      type_converter.convertType(builder.getF32FloatAttr(value).getType());
+  return mlir::vhlo::FloatV1Attr::get(builder.getContext(), vhlo_type,
+                                      ::llvm::APFloat(value));
 }
 
 static mlir::Attribute BuildRankedTensorAttr(std::vector<int64_t> shape,
@@ -446,8 +447,7 @@ static std::vector<mlir::Attribute> BuildAttributeVectorFromFlatbuffer(
     } else if (value.IsInt()) {
       mlir_vector.push_back(BuildVhloIntV1Attr(value.AsInt64(), builder));
     } else if (value.IsFloat()) {
-      mlir_vector.push_back(BuildVhloFloatV1Attr(llvm::APFloat(value.AsFloat()),
-                                                 mlir::Float32Type(), builder));
+      mlir_vector.push_back(BuildVhloFloatV1Attr(value.AsFloat(), builder));
     } else if (value.IsVector()) {
       std::vector<mlir::Attribute> nested_mlir_vector =
           BuildAttributeVectorFromFlatbuffer(value.AsVector(), builder);
@@ -713,8 +713,8 @@ void BuiltinOptions2ToAttributesManual(
             BuildVhloIntV1Attr(value.AsInt64(), builder);
       }
       if (value.IsFloat()) {
-        composite_attribute_pair.second = BuildVhloFloatV1Attr(
-            llvm::APFloat(value.AsFloat()), mlir::Float32Type(), builder);
+        composite_attribute_pair.second =
+            BuildVhloFloatV1Attr(value.AsFloat(), builder);
       }
 
       if (value.IsVector()) {

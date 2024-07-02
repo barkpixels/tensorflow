@@ -28,6 +28,7 @@ xla_cc_binary(
         "//xla/stream_executor/host:host_platform",
         "//xla/translate/hlo_to_mhlo:translate_registration",
         "//xla/translate/mhlo_to_hlo:translate_registration",
+        "//xla/translate/stablehlo_to_hlo:translate_registration",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Support",
@@ -52,7 +53,6 @@ xla_cc_binary(
         "//xla/mlir/framework/transforms:passes",
         "//xla/mlir_hlo:hlo_dialect_registration",
         "//xla/service:cpu_plugin",
-        "//xla/service/cpu:hlo_xla_runtime_pipeline",  # buildcleaner: keep
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:AllPassesAndDialects",
         "@llvm-project//mlir:MlirOptLib",

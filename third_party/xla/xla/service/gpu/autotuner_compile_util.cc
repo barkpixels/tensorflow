@@ -84,16 +84,18 @@ AutotunerCompileUtil::AutotunerCompileUtil(const AutotuneConfig& config,
       allocator_(allocator),
       opts_(opts) {
   // Avoid dumping compilation steps.
-  opts_.set_xla_dump_to("");
+  opts_.set_xla_enable_dumping(false);
   opts_.set_xla_gpu_dump_autotune_results_to("");
   opts_.set_xla_gpu_load_autotune_results_from("");
   opts_.set_xla_gpu_dump_llvmir(false);
+  opts_.set_xla_gpu_dump_autotune_logs_to("");
   // Avoid using another thread pool.
   opts_.set_xla_gpu_force_compilation_parallelism(1);
   opts_.set_xla_gpu_enable_llvm_module_compilation_parallelism(false);
   // Avoid using GPU graphs as we don't want to measure graph construction time.
   opts_.clear_xla_gpu_enable_command_buffer();
   opts_.set_xla_embed_ir_in_executable(false);
+  opts_.set_xla_gpu_kernel_cache_file("");
 }
 
 absl::StatusOr<std::optional<AutotunerCompileUtil::ProfilingOutput>>
@@ -174,7 +176,7 @@ AutotunerCompileUtil::Create(const AutotuneConfig& config,
   se::DeviceMemoryAllocator* allocator = config.GetAllocator();
   TF_ASSIGN_OR_RETURN(se::Stream* const stream, config.GetStream());
   TF_ASSIGN_OR_RETURN(Compiler * compiler,
-                      Compiler::GetForPlatform(stream_exec->platform()));
+                      Compiler::GetForPlatform(stream_exec->GetPlatform()));
   return AutotunerCompileUtil(config, compiler, *stream_exec, *stream,
                               *allocator, opts);
 }

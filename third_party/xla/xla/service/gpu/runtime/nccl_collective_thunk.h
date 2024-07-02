@@ -25,7 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
-#include "absl/container/node_hash_map.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
@@ -45,7 +45,6 @@ limitations under the License.
 #include "xla/service/llvm_ir/llvm_util.h"
 #include "xla/service/rendezvous.h"
 #include "xla/shape.h"
-#include "xla/status.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/event.h"
 #include "xla/stream_executor/stream.h"
@@ -155,7 +154,7 @@ class NcclCollectiveThunk : public Thunk {
 
    private:
     absl::Mutex mu_;
-    absl::node_hash_map<se::StreamExecutor*, se::Event> events_
+    absl::flat_hash_map<se::StreamExecutor*, std::unique_ptr<se::Event>> events_
         ABSL_GUARDED_BY(mu_);
   };
 
@@ -174,6 +173,15 @@ class NcclCollectiveThunk : public Thunk {
   std::shared_ptr<AsyncEvents> async_events() const { return async_events_; }
   void set_async_events(std::shared_ptr<AsyncEvents> async_events) {
     async_events_ = async_events;
+  }
+
+  NcclStreamId nccl_stream_id() const {
+    return xla::gpu::GetStreamId(IsAsync(), GetAsyncStreamKind());
+  }
+
+  ExecutionStreamId nccl_execution_stream_id() const {
+    return ExecutionStreamId(execution_stream_id().value() +
+                             nccl_stream_id().value());
   }
 
  protected:
@@ -197,11 +205,6 @@ class NcclCollectiveThunk : public Thunk {
 
  private:
   bool IsAsync() const { return async_events_ != nullptr; }
-  NcclStreamId GetStreamId() const {
-    return xla::gpu::GetStreamId(execution_stream_id().value(), IsAsync(),
-                                 GetAsyncStreamKind());
-  }
-
   NcclApi* nccl_api_;
   std::shared_ptr<AsyncEvents> async_events_;
 
@@ -224,12 +227,22 @@ class NcclCollectiveDoneThunk : public Thunk {
  public:
   NcclCollectiveDoneThunk(
       Thunk::Kind kind, ThunkInfo thunk_info,
-      std::shared_ptr<NcclCollectiveThunk::AsyncEvents> async_events);
+      std::shared_ptr<NcclCollectiveThunk::AsyncEvents> async_events,
+      AsyncStreamKind async_stream_kind);
 
   absl::Status ExecuteOnStream(const ExecuteParams& params) override;
 
+  // return the execution stream id wheer previous async operator was launched
+  // to.
+  ExecutionStreamId nccl_execution_stream_id() const {
+    return ExecutionStreamId(
+        execution_stream_id().value() +
+        xla::gpu::GetStreamId(true, async_stream_kind_).value());
+  }
+
  private:
   std::shared_ptr<NcclCollectiveThunk::AsyncEvents> async_events_;
+  AsyncStreamKind async_stream_kind_ = AsyncStreamKind::kCollective;
 };
 
 //===----------------------------------------------------------------------===//
@@ -257,7 +270,7 @@ absl::Status AddOpDescription(absl::Status status, OpT op,
     str = llvm_ir::DumpToString(op.getOperation());
   }
 
-  return Status(
+  return absl::Status(
       status.code(),
       absl::StrFormat(
           "%s\n"
@@ -306,9 +319,9 @@ absl::StatusOr<std::vector<DeviceBufferPair>> ConvertToDeviceBuffers(
 // communicator to enable zero-copy collectives.
 //
 // https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/bufferreg.html
-Status MaybeRegisterBuffers(NcclApi* nccl_api, int device_ordinal,
-                            const std::vector<DeviceBufferPair>& buffers,
-                            NcclApi::NcclCommHandle comm);
+absl::Status MaybeRegisterBuffers(NcclApi* nccl_api, int device_ordinal,
+                                  const std::vector<DeviceBufferPair>& buffers,
+                                  NcclApi::NcclCommHandle comm);
 
 }  // namespace gpu
 }  // namespace xla

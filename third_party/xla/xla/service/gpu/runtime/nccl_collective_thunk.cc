@@ -50,7 +50,6 @@ limitations under the License.
 #include "xla/service/gpu/runtime/thunk.h"
 #include "xla/service/rendezvous.h"
 #include "xla/shape.h"
-#include "xla/status.h"
 #include "xla/stream_executor/event.h"
 #include "xla/stream_executor/gpu/gpu_activation.h"
 #include "xla/stream_executor/stream.h"
@@ -290,9 +289,9 @@ absl::StatusOr<std::vector<DeviceBufferPair>> ConvertToDeviceBuffers(
   return device_buffers;
 }
 
-Status RegisterBufferOnce(NcclApi* nccl_api, int device_ordinal,
-                          NcclApi::NcclCommHandle comm,
-                          se::DeviceMemoryBase buffer) {
+absl::Status RegisterBufferOnce(NcclApi* nccl_api, int device_ordinal,
+                                NcclApi::NcclCommHandle comm,
+                                se::DeviceMemoryBase buffer) {
   // Keep track of which communicators we have registered for already.
   // Each ncclMemAlloc'd buffer needs to be registered once per comm.
   struct RegisteredBuffers {
@@ -329,12 +328,12 @@ Status RegisterBufferOnce(NcclApi* nccl_api, int device_ordinal,
     all_registered.handles.push_back(handle);
     all_registered.records.insert({device_ordinal, comm, base_ptr});
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
-Status MaybeRegisterBuffers(NcclApi* nccl_api, int device_ordinal,
-                            const std::vector<DeviceBufferPair>& buffers,
-                            NcclApi::NcclCommHandle comm) {
+absl::Status MaybeRegisterBuffers(NcclApi* nccl_api, int device_ordinal,
+                                  const std::vector<DeviceBufferPair>& buffers,
+                                  NcclApi::NcclCommHandle comm) {
   for (int i = 0; i < buffers.size(); ++i) {
     if (buffers[i].source_memory_space == kCollectiveMemorySpaceColor) {
       TF_RETURN_IF_ERROR(RegisterBufferOnce(nccl_api, device_ordinal, comm,
@@ -345,7 +344,7 @@ Status MaybeRegisterBuffers(NcclApi* nccl_api, int device_ordinal,
                                             buffers[i].destination_buffer));
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::Status NcclCollectiveThunk::AsyncEvents::Initialize(
@@ -353,11 +352,7 @@ absl::Status NcclCollectiveThunk::AsyncEvents::Initialize(
   absl::MutexLock lock(&mu_);
   if (events_.contains(executor)) return absl::OkStatus();
 
-  se::Event event(executor);
-  if (!event.Init()) {
-    return absl::InternalError(
-        "Failed to initialize collective operation async completion event");
-  }
+  TF_ASSIGN_OR_RETURN(auto event, executor->CreateEvent());
 
   events_.try_emplace(executor, std::move(event));
   return absl::OkStatus();
@@ -373,7 +368,7 @@ absl::StatusOr<se::Event*> NcclCollectiveThunk::AsyncEvents::GetEvent(
         "Collective operation async completion event not initialized");
   }
 
-  return &event->second;
+  return event->second.get();
 }
 
 absl::Status NcclCollectiveThunk::Prepare(const PrepareParams& params,
@@ -402,7 +397,7 @@ absl::Status NcclCollectiveThunk::Prepare(const PrepareParams& params,
       xla::GetDebugOptionsFromFlags().xla_gpu_enable_nccl_per_stream_comms();
   return resource_requests.AddClique(
       NcclCliqueKey(std::move(participants),
-                    enable_per_stream_comms ? GetStreamId() : kNoStreamId,
+                    enable_per_stream_comms ? nccl_stream_id() : kNoStreamId,
                     stream_kind),
       num_local_participants);
 }
@@ -432,10 +427,10 @@ bool operator==(const FirstCallRendezvousKey& a,
 }
 }  // namespace
 
-Status NcclCollectiveThunk::ExecuteOnStream(const ExecuteParams& params) {
+absl::Status NcclCollectiveThunk::ExecuteOnStream(const ExecuteParams& params) {
   VLOG(1) << absl::StreamFormat("Starting %s %s.", IsAsync() ? "async" : "sync",
                                 Thunk::KindToString(kind()));
-  const NcclStreamId stream_id = GetStreamId();
+  const NcclStreamId stream_id = nccl_stream_id();
   AsyncStreamKind stream_kind = GetAsyncStreamKind();
   TF_ASSIGN_OR_RETURN(
       NcclCommHandleWrapper comm_handle,
@@ -447,7 +442,8 @@ Status NcclCollectiveThunk::ExecuteOnStream(const ExecuteParams& params) {
 
   if (IsAsync()) {
     // Launch collective operation on an async stream.
-    se::Stream& async_stream = *params.async_comms_streams[async_stream_idx];
+    se::Stream& async_stream =
+        *params.collective_params->async_streams.at(async_stream_idx);
 
     // Wait for main compute stream to make sure all buffers are ready.
     TF_RETURN_IF_ERROR(async_stream.WaitFor(params.stream));
@@ -514,19 +510,17 @@ std::string NcclCollectiveThunk::GetDeviceString(
 
 NcclCollectiveDoneThunk::NcclCollectiveDoneThunk(
     Thunk::Kind kind, ThunkInfo thunk_info,
-    std::shared_ptr<NcclCollectiveThunk::AsyncEvents> async_events)
-    : Thunk(kind, std::move(thunk_info)), async_events_(async_events) {}
+    std::shared_ptr<NcclCollectiveThunk::AsyncEvents> async_events,
+    AsyncStreamKind async_stream_kind)
+    : Thunk(kind, std::move(thunk_info)),
+      async_events_(async_events),
+      async_stream_kind_(async_stream_kind) {}
 
 absl::Status NcclCollectiveDoneThunk::ExecuteOnStream(
     const ExecuteParams& params) {
   se::StreamExecutor* executor = params.stream->parent();
   TF_ASSIGN_OR_RETURN(se::Event * event, async_events_->GetEvent(executor));
   return params.stream->WaitFor(event);
-}
-
-absl::Status IsValidOperand(mlir::Value operand, Thunk::Kind reduction_op) {
-  Shape shape = GetShape(operand);
-  return IsValidOperand(shape, reduction_op);
 }
 
 absl::Status IsValidOperand(Shape shape, Thunk::Kind reduction_op) {

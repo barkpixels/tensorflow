@@ -37,6 +37,8 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/functional/any_invocable.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/utils/hlo_live_range.h"
@@ -54,8 +56,6 @@ limitations under the License.
 #include "xla/service/memory_space_assignment/slice.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
-#include "xla/statusor.h"
 #include "xla/util.h"
 
 namespace xla {
@@ -684,8 +684,8 @@ class MsaAlgorithm : public GlobalDecreasingSizeBestFitHeap<HloValue> {
   // For the given loop with the start and end index and loop size, run the
   // MemoryBoundLoopOptimizer and record its outputs into
   // optimized_allocations_map_.
-  Status OptimizeMemoryBoundLoop(int loop_start_idx, int loop_end_idx,
-                                 int loop_size);
+  absl::Status OptimizeMemoryBoundLoop(int loop_start_idx, int loop_end_idx,
+                                       int loop_size);
 
   // Identify memory-bound loops in the graph and call OptimizeMemoryBoundLoop
   // for the found loops.
@@ -713,6 +713,47 @@ class MsaAlgorithm : public GlobalDecreasingSizeBestFitHeap<HloValue> {
   // Returns true if the use is allowed in the alternate memory.
   bool IsUseAllowedInAlternateMemory(const AllocationValue& value,
                                      const HloUse& use) const;
+
+  // Adjusts the preferred memory offset for a given use, taking aliasing
+  // constraints into account. If the use already has a preferred offset in the
+  // alternate memory space (e.g., due to prior allocations), the offset derived
+  // from aliasing considerations must match the existing preferred offset.
+  AliasedOffset* UpdatePreferredOffsetForUse(
+      const AllocationValue::Use& use, AliasedOffset* preferred_offset) const;
+
+  // Propagate the allocation at the use time to any aliases that this use might
+  // have had.
+  void UpdateAllocationRequirementForUseAliases(
+      const AllocationValue& allocation_value, const AllocationValue::Use& use,
+      int64_t use_time);
+
+  // For while uses that are allocated in the alternate memory space, if
+  // they also have an allocation in the default memory space in their
+  // allocation sequence, create a "parent" allocation that mirrors this
+  // default memory space allocation. When we process the parent
+  // allocation, we add an additional parameter to the while that is a
+  // reference to the buffer in the default memory space. With parent
+  // allocations, we don't need to unnecessarily evict buffers since they
+  // already have a copy in the default memory space. We search backwards
+  // (latest to earliest in execution time) for a suitable allocation in
+  // order to find the most recent one.
+  void MaybeCreateMirroredParentAllocationForWhileUse(
+      const AllocationValue& allocation_value, const AllocationValue::Use& use,
+      int64_t use_time, absl::Span<AllocationValue> allocation_values,
+      absl::flat_hash_map<const HloComputation*, AliasedOffset*>&
+          preferred_offset_for_computation);
+
+  // Creates a detailed memory allocation request for a given use of an
+  // allocation value. Analyzes the usage pattern of the use to determine if it
+  // can be placed in alternate memory, considering the restrictions for loops
+  // and conditionals. Also calculates the timing for prefetching, taking into
+  // account instruction schedules, operation type (e.g., sequential vs.
+  // non-sequential calls), and prior usage patterns.
+  AllocationRequest CreateAllocationRequest(
+      AllocationValue& allocation_value, const AllocationValue::Use& use,
+      const AllocationValue::Use* previous_use, AliasedOffset* preferred_offset,
+      int64_t definition_time, bool require_no_copy_alternate_mem_allocation,
+      const std::vector<int64_t>& all_use_times);
 
   // Finds allocations for allocation values generated from colocated intervals.
   // All of the allocation values have a must-alias relationship with each
@@ -904,7 +945,7 @@ class MsaAlgorithm : public GlobalDecreasingSizeBestFitHeap<HloValue> {
   // Helper functions to implement ImportRepackedAllocations.
   void ImportRepackedNonSlicedAllocation(RepackAllocationBlock& block);
   void ImportRepackedSlicedAllocation(RepackAllocationBlock& block);
-  Status AreRepackedSlicesValid(const RepackAllocationBlock& block);
+  absl::Status AreRepackedSlicesValid(const RepackAllocationBlock& block);
 
   // Adds an asynchronous copy to allocations.
   void AddAsyncCopy(
