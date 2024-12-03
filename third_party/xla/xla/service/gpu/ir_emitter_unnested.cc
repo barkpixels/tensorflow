@@ -68,6 +68,7 @@ limitations under the License.
 #include "mlir/Target/LLVMIR/Dialect/NVVM/NVVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
+#include "xla/backends/gpu/collectives/gpu_clique_key.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/attribute_map.h"
 #include "xla/ffi/ffi_api.h"
@@ -80,6 +81,7 @@ limitations under the License.
 #include "xla/layout.h"
 #include "xla/layout_util.h"
 #include "xla/literal.h"
+#include "xla/mlir/utils/error_util.h"
 #include "xla/mlir_hlo/transforms/gpu_passes.h"
 #include "xla/primitive_util.h"
 #include "xla/service/buffer_assignment.h"
@@ -125,7 +127,6 @@ limitations under the License.
 #include "xla/service/gpu/runtime/nccl_all_to_all_thunk.h"
 #include "xla/service/gpu/runtime/nccl_api.h"
 #include "xla/service/gpu/runtime/nccl_clique.h"
-#include "xla/service/gpu/runtime/nccl_clique_key.h"
 #include "xla/service/gpu/runtime/nccl_collective_broadcast_thunk.h"
 #include "xla/service/gpu/runtime/nccl_collective_permute_thunk.h"
 #include "xla/service/gpu/runtime/nccl_collective_thunk.h"
@@ -1380,9 +1381,19 @@ absl::Status IrEmitterUnnested::EmitTritonCustomCall(
         ir_emitter_context_->name_uniquer()->GetUniqueName(call.name);
     VLOG(3) << "Generating: " << kernel_name;
 
-    auto triton_module =
-        mlir::parseSourceString<mlir::ModuleOp>(call.ir, &mlir_context);
-    TF_RET_CHECK(triton_module) << "Failed to parse Triton module: " << call.ir;
+    mlir::OwningOpRef<mlir::ModuleOp> triton_module;
+    {
+      mlir::BaseScopedDiagnosticHandler diagnostic_handler(&mlir_context);
+      triton_module =
+          mlir::parseSourceString<mlir::ModuleOp>(call.ir, &mlir_context);
+      if (!triton_module) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Failed to parse Triton module: ",
+                         diagnostic_handler.ConsumeStatus().message(),
+                         "\ninput ir: ", call.ir));
+      }
+    }
+
     auto triton_fn =
         triton_module->lookupSymbol<mlir::triton::FuncOp>(call.name);
     TF_RET_CHECK(triton_fn)
