@@ -1,7 +1,6 @@
 load("@local_config_rocm//rocm:build_defs.bzl", "if_rocm_is_configured")
 load("//xla:xla.bzl", "xla_cc_test")
 load("//xla/tests:build_defs.bzl", "xla_test")
-load("//xla/tsl:tsl.bzl", "if_oss")
 load("//xla/tsl/platform/default:cuda_build_defs.bzl", "if_cuda_is_configured")
 
 package(
@@ -61,7 +60,6 @@ cc_library(
     name = "custom",
     srcs = ["custom.cc"],
     hdrs = ["custom.h"],
-    local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]),
     deps = [
         ":fusion_emitter",
         "//xla:literal",
@@ -69,6 +67,7 @@ cc_library(
         "//xla:status_macros",
         "//xla:util",
         "//xla:xla_data_proto_cc",
+        "//xla/backends/gpu/collectives:gpu_clique_key",
         "//xla/ffi:attribute_map",
         "//xla/ffi:ffi_api",
         "//xla/hlo/ir:hlo",
@@ -89,15 +88,15 @@ cc_library(
         "//xla/service/gpu/kernels:custom_kernel",
         "//xla/service/gpu/kernels:custom_kernel_fusion",
         "//xla/service/gpu/runtime:copy_thunk",
+        "//xla/service/gpu/runtime:custom_call_target",
         "//xla/service/gpu/runtime:custom_call_thunk",
         "//xla/service/gpu/runtime:dynamic_slice_thunk",
         "//xla/service/gpu/runtime:gemm_thunk",
         "//xla/service/gpu/runtime:kernel_thunk",
         "//xla/service/gpu/runtime:nccl_all_reduce_thunk",
-        "//xla/service/gpu/runtime:nccl_api",
-        "//xla/service/gpu/runtime:nccl_clique_key",
         "//xla/service/gpu/runtime:nccl_collective_thunk",
         "//xla/service/gpu/runtime:thunk",
+        "//xla/stream_executor:stream",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
@@ -269,6 +268,7 @@ cc_library(
     deps = [
         "//xla:shape_util",
         "//xla:xla_data_proto_cc",
+        "//xla/codegen/ir:xla",
         "//xla/hlo/analysis:indexing_analysis",
         "//xla/hlo/ir:hlo",
         "//xla/service:scatter_simplifier",
@@ -373,7 +373,7 @@ cc_library(
 xla_cc_test(
     name = "triton_test",
     srcs = ["triton_test.cc"],
-    local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]),
+    tags = ["gpu"],
     deps = [
         ":fusion_emitter",
         ":fusions",
@@ -417,7 +417,8 @@ xla_test(
     srcs = if_cuda_is_configured(["cudnn_test.cc"]),
     backends = [
         "gpu_h100",
-    ] + if_oss(["gpu_b100"]),
+        "gpu_b100",
+    ],
     deps = [
         "//xla:comparison_util",
         "//xla:debug_options_flags",
