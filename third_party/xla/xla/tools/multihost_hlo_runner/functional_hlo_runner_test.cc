@@ -33,6 +33,7 @@ limitations under the License.
 #include "xla/status_macros.h"
 #include "xla/tools/multihost_hlo_runner/create_client.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/subprocess.h"
 #include "xla/tsl/util/command_line_flags.h"
 #include "xla/xla.pb.h"
 #include "tsl/platform/env.h"
@@ -40,7 +41,6 @@ limitations under the License.
 #include "tsl/platform/file_system.h"
 #include "tsl/platform/path.h"
 #include "tsl/platform/statusor.h"
-#include "tsl/platform/subprocess.h"
 #include "tsl/platform/test.h"
 
 namespace xla {
@@ -288,11 +288,10 @@ TEST_F(FunctionalHloRunnerTest, ShardedAutotuningWorks) {
 }
 
 absl::Status ShardedAutotuningWorksTestBody(const int node_id) {
-  tsl::setenv("CUDA_VISIBLE_DEVICES", std::to_string(node_id).data(),
-              /*overwrite=*/true);
   GpuClientOptions gpu_options;
   gpu_options.node_id = node_id;
   gpu_options.num_nodes = kNumNodes;
+  gpu_options.allowed_devices = {node_id};
   TF_ASSIGN_OR_RETURN(
       PjRtEnvironment env,
       xla::GetPjRtEnvironmentForGpu("127.0.0.1:12345", gpu_options,

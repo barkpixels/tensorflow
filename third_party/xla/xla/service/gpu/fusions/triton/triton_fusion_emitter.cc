@@ -81,6 +81,7 @@ limitations under the License.
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
 #include "xla/autotuning.pb.h"
+#include "xla/codegen/ir/xla_ops.h"
 #include "xla/hlo/analysis/indexing_analysis.h"
 #include "xla/hlo/analysis/indexing_map.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
@@ -1008,8 +1009,8 @@ void LoadMlirDialectsForTriton(mlir::MLIRContext& mlir_context) {
   mlir_context
       .loadDialect<ttir::TritonDialect, ttir::gpu::TritonGPUDialect,
                    mlir::arith::ArithDialect, mlir::affine::AffineDialect,
-                   mlir::LLVM::LLVMDialect, xla::gpu::XlaGpuDialect,
-                   ttir::xla::XlaTritonDialect>();
+                   mlir::LLVM::LLVMDialect, xla::XlaDialect,
+                   xla::gpu::XlaGpuDialect, ttir::xla::XlaTritonDialect>();
   mlir::DialectRegistry registry;
   mlir::func::registerInlinerExtension(registry);
   mlir::LLVM::registerInlinerInterface(registry);
@@ -1183,18 +1184,18 @@ absl::StatusOr<TritonWrapperResult> TritonWrapper(
 
   // Compile Triton kernel to LLVM.
   const HloModule* hlo_module = fusion->GetModule();
-  return CompileTritonToLLVM(hlo_module->config(), hlo_module->name(), cc,
+  return CompileTritonToLLVM(hlo_module->config(), hlo_module->name(),
                              device_info, block_level_parameters,
                              triton_module.get(), llvm_module, mlir_context);
 }
 
 absl::StatusOr<TritonWrapperResult> CompileTritonToLLVM(
     const HloModuleConfig& hlo_config, absl::string_view hlo_module_name,
-    const se::GpuComputeCapability& cc,
     const se::DeviceDescription& device_info,
     const BlockLevelParameters& block_level_parameters,
     mlir::ModuleOp triton_module, llvm::Module* llvm_module,
     mlir::MLIRContext& mlir_context, bool emit_kernel) {
+  const auto& cc = device_info.gpu_compute_capability();
   if (std::holds_alternative<se::CudaComputeCapability>(cc)) {
     auto ccCuda = std::get<se::CudaComputeCapability>(cc);
     if (!ccCuda.IsAtLeastAmpere()) {
@@ -1279,8 +1280,7 @@ absl::StatusOr<TritonWrapperResult> CompileTritonToLLVM(
   }
 
   const int shared_mem_bytes =
-      triton_module->getAttrOfType<mlir::IntegerAttr>("triton_gpu.shared")
-          .getInt();
+      triton_module->getAttrOfType<mlir::IntegerAttr>("ttg.shared").getInt();
   VLOG(2) << "Shared memory usage: " << shared_mem_bytes << " B";
   if (std::holds_alternative<se::CudaComputeCapability>(cc) &&
       shared_mem_bytes > device_info.shared_memory_per_block_optin()) {
