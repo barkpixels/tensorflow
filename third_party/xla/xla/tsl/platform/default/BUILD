@@ -18,6 +18,7 @@ package(
         "//tensorflow/core/lib/jpeg:__pkg__",
         "//tensorflow/core/platform:__pkg__",
         "@local_tsl//tsl/platform:__pkg__",
+        "//xla/tsl/platform:__pkg__",
     ]),
     licenses = ["notice"],
 )
@@ -296,27 +297,6 @@ filegroup(
 )
 
 cc_library(
-    name = "mutex",
-    srcs = [
-        "mutex.cc",
-        "mutex_data.h",
-        "@local_tsl//tsl/platform:mutex.h",
-    ],
-    tags = [
-        "manual",
-        "no_oss",
-        "nobuilder",
-    ],
-    textual_hdrs = ["mutex.h"],
-    deps = [
-        "@local_tsl//tsl/platform",
-        "@local_tsl//tsl/platform:macros",
-        "@local_tsl//tsl/platform:thread_annotations",
-        "@nsync//:nsync_cpp",
-    ],
-)
-
-cc_library(
     name = "net",
     srcs = ["net.cc"],
     hdrs = [
@@ -438,7 +418,7 @@ cc_library(
 cc_library(
     name = "subprocess",
     srcs = ["subprocess.cc"],
-    hdrs = ["@local_tsl//tsl/platform:subprocess.h"],
+    hdrs = ["//xla/tsl/platform:subprocess.h"],
     tags = [
         "manual",
         "no_oss",
@@ -615,8 +595,6 @@ filegroup(
     srcs = [
         "casts.h",
         "error_logging.cc",
-        "mutex.h",
-        "mutex_data.h",
         "unbounded_work_queue.cc",
         "unbounded_work_queue.h",
     ] + if_not_fuchsia([

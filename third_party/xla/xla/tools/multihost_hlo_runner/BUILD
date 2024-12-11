@@ -148,6 +148,7 @@ cc_library(
         "//xla/pjrt:pjrt_compiler",
         "//xla/pjrt:pjrt_executable",
         "//xla/pjrt:pjrt_future",
+        "//xla/pjrt:pjrt_layout",
         "//xla/pjrt/distributed:key_value_store_interface",
         "//xla/service:computation_layout",
         "//xla/service:computation_placer_hdr",
@@ -206,6 +207,7 @@ xla_test(
         "//xla/pjrt:pjrt_client",
         "//xla/pjrt/plugin/xla_gpu:xla_gpu_client_options",
         "//xla/tsl/lib/core:status_test_util",
+        "//xla/tsl/platform:subprocess",
         "//xla/tsl/util:command_line_flags",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
@@ -218,7 +220,6 @@ xla_test(
         "@local_tsl//tsl/platform:errors",
         "@local_tsl//tsl/platform:path",
         "@local_tsl//tsl/platform:statusor",
-        "@local_tsl//tsl/platform:subprocess",
         "@local_tsl//tsl/platform:test",
     ],
 )

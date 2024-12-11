@@ -17,6 +17,7 @@
 #include <alloca.h>
 #include <stdio.h>
 
+#include <algorithm>
 #include <cstdint>
 
 #include "absl/container/flat_hash_map.h"
@@ -29,6 +30,7 @@
 #include "tensorflow/lite/experimental/litert/c/litert_common.h"
 #include "tensorflow/lite/experimental/litert/c/litert_logging.h"
 #include "tensorflow/lite/experimental/litert/c/litert_model.h"
+#include "tensorflow/lite/experimental/litert/cc/litert_element_type.h"
 #include "tensorflow/lite/experimental/litert/cc/litert_macros.h"
 #include "tensorflow/lite/experimental/litert/cc/litert_model.h"
 #include "tensorflow/lite/experimental/litert/vendors/qualcomm/common.h"
@@ -38,7 +40,7 @@
 namespace litert::qnn {
 
 // Get empty configurations for graph building.
-inline absl::Span<const QnnGraph_Config_t*> GetDefaultGraphConfigs() {
+inline absl::Span<const QnnGraph_Config_t*> GetFp32GraphConfigs() {
   static QnnHtpGraph_CustomConfig_t htp_graph_config =
       QNN_HTP_GRAPH_CUSTOM_CONFIG_INIT;
   htp_graph_config.option = QNN_HTP_GRAPH_CONFIG_OPTION_PRECISION;
@@ -50,6 +52,25 @@ inline absl::Span<const QnnGraph_Config_t*> GetDefaultGraphConfigs() {
 
   static const QnnGraph_Config_t* configs[2] = {&graph_config, nullptr};
   return absl::MakeSpan(configs);
+}
+
+inline absl::Span<const QnnGraph_Config_t*> GetDefaultGraphConfigs() {
+  static const QnnGraph_Config_t* configs[] = {nullptr};
+  return absl::MakeSpan(configs);
+}
+
+absl::Span<const QnnGraph_Config_t*> GraphMapper::PickGraphConfigHeuristic() {
+  for (const auto& input : subgraph_.Inputs()) {
+    if (input.RankedTensorType().ElementType() == ElementType::Float32) {
+      return GetFp32GraphConfigs();
+    }
+  }
+  for (const auto& output : subgraph_.Outputs()) {
+    if (output.RankedTensorType().ElementType() == ElementType::Float32) {
+      return GetFp32GraphConfigs();
+    }
+  }
+  return GetDefaultGraphConfigs();
 }
 
 LiteRtStatus GraphMapper::AssignTensorName(Qnn_Tensor_t& qnn_tensor) {
@@ -103,6 +124,14 @@ LiteRtStatus GraphMapper::LegalizeAndRegister(LiteRtTensor litert_tensor,
   litert::Tensor tensor(litert_tensor);
   LITERT_RETURN_STATUS_IF_NOT_OK(LegalizeTensor(tensor, qnn_tensor));
   LITERT_RETURN_STATUS_IF_NOT_OK(AssignTensorName(qnn_tensor));
+
+  // Set tensor as graph output if it is used by other Ops.
+  if (graph_outpus_.contains(litert_tensor)) {
+    LITERT_LOG(LITERT_INFO, "Setting tensor %d as Graph output",
+               qnn_tensor.v2.id);
+    qnn_tensor.v2.type = QNN_TENSOR_TYPE_APP_READ;
+  }
+
   LITERT_RETURN_STATUS_IF_QNN_NOT_OK(
       qnn_.Api()->tensorCreateGraphTensor(QnnGraph(), &qnn_tensor));
 
@@ -121,7 +150,7 @@ LiteRtStatus GraphMapper::IsLiteRtSubgraphSupported() {
 LiteRtStatus GraphMapper::InitQnnGraph(absl::string_view qnn_graph_name) {
   LITERT_RETURN_STATUS_IF_QNN_NOT_OK(
       qnn_.Api()->graphCreate(context_handle_, qnn_graph_name.data(),
-                              GetDefaultGraphConfigs().data(), &QnnGraph()));
+                              PickGraphConfigHeuristic().data(), &QnnGraph()));
   return kLiteRtStatusOk;
 }
 
