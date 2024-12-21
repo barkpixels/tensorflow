@@ -32,6 +32,7 @@ limitations under the License.
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Value.h"
+#include "xla/backends/gpu/collectives/gpu_clique_key.h"
 #include "xla/backends/gpu/collectives/gpu_collectives.h"
 #include "xla/core/collectives/communicator.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -42,8 +43,6 @@ limitations under the License.
 #include "xla/service/global_device_id.h"
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/service/gpu/ir_emission_utils.h"
-#include "xla/service/gpu/runtime/nccl_api.h"
-#include "xla/service/gpu/runtime/nccl_clique_key.h"
 #include "xla/service/gpu/runtime/thunk.h"
 #include "xla/service/llvm_ir/llvm_util.h"
 #include "xla/service/rendezvous.h"
@@ -55,8 +54,6 @@ limitations under the License.
 
 namespace xla {
 namespace gpu {
-
-class NcclClique;
 
 struct NcclCollectiveConfig {
   int64_t operand_count;
@@ -127,8 +124,7 @@ class NcclCollectiveDoneThunk;
 // Thunk base class for NCCL collective operations.
 class NcclCollectiveThunk : public Thunk {
  public:
-  NcclCollectiveThunk(Kind kind, ThunkInfo thunk_info, NcclApi* nccl_api,
-                      bool is_sync);
+  NcclCollectiveThunk(Kind kind, ThunkInfo thunk_info, bool is_sync);
 
   struct Buffer {
     int64_t element_count;
@@ -147,6 +143,7 @@ class NcclCollectiveThunk : public Thunk {
    private:
     friend class NcclCollectiveThunk;
     friend class NcclCollectiveDoneThunk;
+    friend class NcclGroupThunk;
 
     absl::Status Initialize(se::StreamExecutor* executor);
     absl::StatusOr<se::Event*> GetEvent(se::StreamExecutor* executor);
@@ -168,7 +165,6 @@ class NcclCollectiveThunk : public Thunk {
 
   absl::Status ExecuteOnStream(const ExecuteParams& params) override;
 
-  NcclApi* nccl_api() const { return nccl_api_; }
   std::shared_ptr<AsyncEvents> async_events() const { return async_events_; }
   void set_async_events(std::shared_ptr<AsyncEvents> async_events) {
     async_events_ = async_events;
@@ -204,7 +200,6 @@ class NcclCollectiveThunk : public Thunk {
 
  private:
   bool IsAsync() const { return async_events_ != nullptr; }
-  NcclApi* nccl_api_;
   std::shared_ptr<AsyncEvents> async_events_;
 
   // After a first call to this particular instance of a NCCL collective thunk
@@ -282,8 +277,8 @@ absl::Status AddOpDescription(absl::Status status, OpT op,
 
 //===----------------------------------------------------------------------===//
 
-absl::StatusOr<NcclCliqueKey> GetNcclCliqueKey(
-    const Thunk::CollectiveExecuteParams& params,
+absl::StatusOr<GpuCliqueKey> GetGpuCliqueKey(
+    GpuCollectives* collectives, const Thunk::CollectiveExecuteParams& params,
     const std::vector<ReplicaGroup>& replica_groups,
     CollectiveOpGroupMode group_mode, CollectiveStreamId stream_id,
     AsyncStreamKind stream_kind);
@@ -295,7 +290,7 @@ absl::StatusOr<size_t> GetNumLocalParticipants(
 
 // Returns a nccl comm and a flag indicating if it's a local communicator.
 absl::StatusOr<CommunicatorHandle> GetNcclComm(
-    const Thunk::CollectiveExecuteParams& params,
+    GpuCollectives* collectives, const Thunk::CollectiveExecuteParams& params,
     const Thunk::CollectiveCliques& collective_cliques,
     const std::vector<ReplicaGroup>& replica_groups,
     CollectiveOpGroupMode group_mode, CollectiveStreamId stream_id,
@@ -324,7 +319,7 @@ absl::StatusOr<std::vector<DeviceBufferPair>> ConvertToDeviceBuffers(
 // communicator to enable zero-copy collectives.
 //
 // https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/bufferreg.html
-absl::Status MaybeRegisterBuffers(NcclApi* nccl_api,
+absl::Status MaybeRegisterBuffers(GpuCollectives* collectives,
                                   se::StreamExecutor* executor,
                                   const std::vector<DeviceBufferPair>& buffers,
                                   Communicator* comm);
