@@ -15,17 +15,69 @@ limitations under the License.
 
 #include "xla/backends/gpu/collectives/gpu_collectives.h"
 
-#include <cstdint>
+#include <cstddef>
+
+#include "absl/status/statusor.h"
+#include "xla/core/collectives/collectives.h"
+#include "xla/core/collectives/collectives_registry.h"
+#include "xla/shape_util.h"
+#include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/stream.h"
+#include "xla/stream_executor/stream_executor.h"
+#include "xla/util.h"
+#include "xla/xla_data.pb.h"
+#include "tsl/platform/casts.h"
+#include "tsl/platform/logging.h"
 
 namespace xla::gpu {
 
-CollectiveStreamId GetCollectiveStreamId(bool is_async,
-                                         AsyncStreamKind stream_kind) {
-  // TODO(ezhulenev): This implementation does not look correct as stream IDs
-  // are not really unique. Figure out if it's the case and fix either the code
-  // or the documentation.
-  int64_t stream_id = static_cast<int64_t>(stream_kind);
-  return CollectiveStreamId(is_async ? stream_id + 1 : 0);
+GpuCollectives* GpuCollectives::Default() {
+  absl::StatusOr<Collectives*> collectives =
+      CollectivesRegistry::Default("gpu");
+  CHECK_OK(collectives) << "Failed to get GPU collectives";  // Crash OK
+
+  if (auto* gpu_collectives = tsl::down_cast<GpuCollectives*>(*collectives)) {
+    return gpu_collectives;
+  }
+
+  LOG(FATAL) << "Unsupported collectives implementation for GPU";
+}
+
+GpuCollectives::Device::Device(se::StreamExecutor* stream_executor)
+    : stream_executor_(stream_executor) {}
+
+se::StreamExecutor* GpuCollectives::Device::stream_executor() const {
+  return stream_executor_;
+}
+
+GpuCollectives::Executor::Executor(stream_executor::Stream* stream)
+    : stream_(stream) {}
+
+stream_executor::Stream* GpuCollectives::Executor::stream() const {
+  return stream_;
+}
+
+absl::StatusOr<GpuCollectives::Device*> GpuCollectives::TryCast(
+    Collectives::Device* device) {
+  if (auto* gpu_device = tsl::down_cast<Device*>(device)) {
+    return gpu_device;
+  }
+  return InvalidArgument("Collectvies device is not a GPU device");
+}
+
+absl::StatusOr<const GpuCollectives::Config*> GpuCollectives::TryCast(
+    const Collectives::Config* config) {
+  if (auto* gpu_config = tsl::down_cast<const Config*>(config)) {
+    return gpu_config;
+  }
+  return InvalidArgument("Collectvies config is not a GPU config");
+}
+
+se::DeviceMemoryBase GpuCollectives::Slice(se::DeviceMemoryBase buff,
+                                           PrimitiveType dtype, size_t offset,
+                                           size_t count) {
+  size_t multiplier = ShapeUtil::ByteSizeOfPrimitiveType(dtype);
+  return buff.GetByteSlice(offset * multiplier, count * multiplier);
 }
 
 }  // namespace xla::gpu

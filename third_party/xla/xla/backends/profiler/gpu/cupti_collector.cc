@@ -15,23 +15,35 @@ limitations under the License.
 
 #include "xla/backends/profiler/gpu/cupti_collector.h"
 
+#include <climits>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <list>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "absl/container/fixed_array.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/hash/hash.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/string_view.h"
 #include "third_party/gpus/cuda/extras/CUPTI/include/cupti.h"
 #include "third_party/gpus/cuda/extras/CUPTI/include/cupti_activity.h"
 #include "third_party/gpus/cuda/include/cuda.h"
 #include "third_party/gpus/cuda/include/cuda_occupancy.h"
 #include "xla/backends/profiler/gpu/cupti_buffer_events.h"
+#include "xla/tsl/profiler/utils/math_utils.h"
 #include "xla/tsl/profiler/utils/parse_annotation.h"
+#include "xla/tsl/profiler/utils/timespan.h"
 #include "xla/tsl/profiler/utils/trace_utils.h"
 #include "xla/tsl/profiler/utils/xplane_builder.h"
 #include "xla/tsl/profiler/utils/xplane_schema.h"
@@ -40,6 +52,9 @@ limitations under the License.
 #include "tsl/platform/host_info.h"
 #include "tsl/platform/mem.h"
 #include "tsl/platform/mutex.h"
+#include "tsl/platform/thread_annotations.h"
+#include "tsl/platform/types.h"
+#include "tsl/profiler/protobuf/xplane.pb.h"
 
 namespace xla {
 namespace profiler {
@@ -47,10 +62,14 @@ namespace profiler {
 namespace {
 
 using tensorflow::profiler::XEventMetadata;
+using tensorflow::profiler::XLine;
+using tensorflow::profiler::XPlane;
 using tensorflow::profiler::XSpace;
+using tensorflow::profiler::XStatMetadata;
 using tsl::mutex;
 using tsl::mutex_lock;
 using tsl::profiler::Annotation;
+using tsl::profiler::FindMutablePlaneWithName;
 using tsl::profiler::FindOrAddMutablePlaneWithName;
 using tsl::profiler::GpuPlaneName;
 using tsl::profiler::kCuptiDriverApiPlaneName;
@@ -63,13 +82,27 @@ using tsl::profiler::XEventBuilder;
 using tsl::profiler::XLineBuilder;
 using tsl::profiler::XPlaneBuilder;
 
+static constexpr int64_t kNvtxLineIdStart = 1LL << 32;
+static constexpr int64_t kNvtxLineIdEnd = 2LL << 32;
+
+bool IsNvtxLine(int64_t line_id) {
+  return line_id >= kNvtxLineIdStart && line_id < kNvtxLineIdEnd;
+}
+
 bool IsHostEvent(const CuptiTracerEvent& event, int64_t* line_id) {
   // DriverCallback(i.e. kernel launching) events are host events.
   if (event.source == CuptiTracerEventSource::DriverCallback) {
     *line_id = event.thread_id;
     return true;
   }
-  // Non-overhead activity events are device events.
+  // nvtx marker events from activity source are host events. Those markers
+  // are put into a separate line whose id value greater than kNvtxLineIdStart.
+  if (event.source == CuptiTracerEventSource::Activity &&
+      event.type == CuptiTracerEventType::ThreadMarkerRange) {
+    *line_id = kNvtxLineIdStart + event.thread_id;
+    return true;
+  }
+  // Other non-overhead activity events are device events.
   if (event.type != CuptiTracerEventType::Overhead) {
     *line_id = event.stream_id;
     return false;
@@ -87,6 +120,37 @@ bool IsHostEvent(const CuptiTracerEvent& event, int64_t* line_id) {
   } else {
     *line_id = kThreadIdOverhead;
     return false;
+  }
+}
+
+int64_t GetNextAvailableLineId(absl::flat_hash_set<int64_t>& occupied_line_ids,
+                               int64_t next_line_id) {
+  while (occupied_line_ids.contains(next_line_id)) ++next_line_id;
+  occupied_line_ids.insert(next_line_id);
+  return next_line_id;
+}
+
+// Change the line id of the lines where line id >= kNvtxLineIdStart to
+// any non-occupied line id start from 1, making sure the lower 32 bits value of
+// the line ids are unique. This is to avoid the effective line id conflict
+// which only count on the lower 32 bits of the line id in further analysis.
+void AdjustHostPlaneNvtxLines(XPlane* plane) {
+  // Get all occupied line ids with value less than kNvtxLineIdStart.
+  absl::flat_hash_set<int64_t> occupied_line_ids;
+  for (const XLine& line : plane->lines()) {
+    if (line.id() < kNvtxLineIdStart) {
+      occupied_line_ids.insert(line.id());
+    }
+  }
+
+  // Change the line id,  whose id value > kNvtxLineIdStart, to a non-occupied
+  // line id in uint32 range.
+  int64_t next_line_id = 0;
+  for (XLine& line : *plane->mutable_lines()) {
+    if (line.id() >= kNvtxLineIdStart) {
+      next_line_id = GetNextAvailableLineId(occupied_line_ids, next_line_id);
+      line.set_id(next_line_id);
+    }
   }
 }
 
@@ -149,7 +213,7 @@ class PerDeviceCollector {
     return stats;
   }
 
-  void CreateXEvent(const CuptiTracerEvent& event, XPlaneBuilder* plane,
+  void CreateXEvent(CuptiTracerEvent& event, XPlaneBuilder* plane,
                     uint64_t start_gpu_ns, uint64_t end_gpu_ns,
                     XLineBuilder* line) {
     if (event.start_time_ns < start_gpu_ns || event.end_time_ns > end_gpu_ns ||
@@ -167,6 +231,12 @@ class PerDeviceCollector {
     if (event.graph_id != 0 && event.type == CuptiTracerEventType::CudaGraph &&
         event.source == CuptiTracerEventSource::DriverCallback) {
       absl::StrAppend(&kernel_name, " (CudaGraph:", event.graph_id, ")");
+    } else if (event.type == CuptiTracerEventType::ThreadMarkerRange) {
+      kernel_name =
+          event.nvtx_range.empty()
+              ? absl::StrCat("NVTX:", kernel_name)
+              : absl::StrCat("NVTX:", event.nvtx_range, ":", kernel_name);
+      event.nvtx_range = "";
     }
     XEventMetadata* event_metadata =
         plane->GetOrCreateEventMetadata(std::move(kernel_name));
@@ -394,7 +464,15 @@ class PerDeviceCollector {
           GetDeviceXLineName(line.Id(), events_types_per_line[line.Id()]));
     });
     host_plane->ForEachLine([&](XLineBuilder line) {
-      line.SetName(absl::StrCat("Host Threads/", line.Id()));
+      if (IsNvtxLine(line.Id())) {
+        // Lines will order by name, by appending suffix to the normal cupti
+        // line name, the nvtx lines will be placed right after their
+        // corresponding cupti lines.
+        line.SetName(absl::StrCat("Host Threads/",
+                                  static_cast<uint32_t>(line.Id()), "/NVTX"));
+      } else {
+        line.SetName(absl::StrCat("Host Threads/", line.Id()));
+      }
     });
     size_t num_events = events_.size();
     events_.clear();
@@ -518,9 +596,10 @@ class PerDeviceCollector {
   absl::flat_hash_map<DeviceOccupancyParams, OccupancyStats> occupancy_cache_;
 };
 
-// Using two iterator of the CuptiTracerEvent queue to mark the current and last
-// event in the queue. It will be used in multi-way merge sort by event's
-// end time as the original per-thread queue is already sort by that.
+// Using two iterator of the CuptiTracerEvent queue to mark the current and
+// last event in the queue. It will be used in multi-way merge sort by
+// event's end time as the original per-thread queue is already sort by
+// that.
 class EventInQueue {
   using Iterator = CallbackAnnotationsAndEvents::EventQueue::Iterator;
 
@@ -536,8 +615,8 @@ class EventInQueue {
   }
 
   CuptiTracerEvent& Event() const {
-    // Directly use *curr_ after base Iterator operator*() with const modifier
-    // in seperate CL.
+    // Directly use *curr_ after base Iterator operator*() with const
+    // modifier in seperate CL.
     auto it = curr_;
     return *it;
   }
@@ -554,6 +633,27 @@ class EventInQueue {
 };
 
 }  // namespace
+
+void PmSamples::PopulateCounterLine(XPlaneBuilder* plane) {
+  XLineBuilder line = plane->GetOrCreateCounterLine();
+  std::vector<std::pair<XEventMetadata*, XStatMetadata*>> counter_metadata;
+  counter_metadata.reserve(metrics_.size());
+  for (auto& metric : metrics_) {
+    counter_metadata.emplace_back(plane->GetOrCreateEventMetadata(metric),
+                                  plane->GetOrCreateStatMetadata(metric));
+  }
+  for (auto& sampler_range : sampler_ranges_) {
+    DCHECK_EQ(metrics_.size(), sampler_range.metric_values.size());
+    for (int i = 0; i < sampler_range.metric_values.size(); ++i) {
+      XEventBuilder event = line.AddEvent(
+          tsl::profiler::Timespan(
+              tsl::profiler::NanoToPico(sampler_range.start_timestamp_ns), 0),
+          *counter_metadata[i].first);
+      event.AddStatValue(*counter_metadata[i].second,
+                         sampler_range.metric_values[i]);
+    }
+  }
+}
 
 void CuptiTraceCollector::OnTracerCollectedCallbackData(
     std::vector<CallbackAnnotationsAndEvents> callback_annotations_and_events,
@@ -642,6 +742,7 @@ void CuptiTraceCollector::OnTracerCachedActivityBuffers(
 
 // CuptiTraceCollectorImpl store the CuptiTracerEvents from CuptiTracer and
 // eventually convert and filter them to XSpace.
+// It also add support to handle cupti activity events for nvtx thread markers.
 class CuptiTraceCollectorImpl : public CuptiTraceCollector {
  public:
   CuptiTraceCollectorImpl(const CuptiTracerCollectorOptions& option,
@@ -660,6 +761,13 @@ class CuptiTraceCollectorImpl : public CuptiTraceCollector {
       num_callback_events_++;
     } else {
       num_activity_events_++;
+    }
+    if (event.type == CuptiTracerEventType::ThreadMarkerStart ||
+        event.type == CuptiTracerEventType::ThreadMarkerEnd) {
+      // Process the nvtx marker, merge thread range start/end if appropriate.
+      // If merged, the event will contains the merged content, and be used for
+      // followed AddEvent() processing.
+      if (!AddNvtxMarker(event)) return;
     }
     per_device_collector_[event.device_id].AddEvent(std::move(event));
   }
@@ -707,6 +815,8 @@ class CuptiTraceCollectorImpl : public CuptiTraceCollector {
           start_gpu_ns_, end_gpu_ns, &device_plane, &host_plane);
       NormalizeTimeStamps(&device_plane, start_walltime_ns_);
     }
+    AdjustHostPlaneNvtxLines(
+        FindMutablePlaneWithName(space, kCuptiDriverApiPlaneName));
     NormalizeTimeStamps(&host_plane, start_walltime_ns_);
     return num_events > 0;
   }
@@ -737,6 +847,39 @@ class CuptiTraceCollectorImpl : public CuptiTraceCollector {
   uint64_t start_walltime_ns_;
   uint64_t start_gpu_ns_;
   int num_gpus_;
+  uint32_t num_duplicate_nvtx_marker_start_ = 0;
+  uint32_t num_unmatched_nvtx_marker_end_ = 0;
+
+  // process the nvtx marker, a)cache range start event, or b)merge range end
+  // with its corresponding start event. If merged, the event be updated with
+  // the merged content and return true. If not merged, return false.
+  bool AddNvtxMarker(CuptiTracerEvent& event) {
+    const uint32_t marker_id = event.graph_id;
+    auto it = nvtx_markers_.find(marker_id);
+    if (event.type == CuptiTracerEventType::ThreadMarkerStart) {
+      if (it == nvtx_markers_.end()) {
+        nvtx_markers_[marker_id] =
+            std::make_unique<CuptiTracerEvent>(std::move(event));
+      } else {
+        LOG_IF(ERROR, ++num_duplicate_nvtx_marker_start_ < 100)
+            << "Duplicate nvtx thread range start marker id: " << marker_id;
+      }
+    } else if (event.type == CuptiTracerEventType::ThreadMarkerEnd) {
+      if (it != nvtx_markers_.end()) {
+        it->second->type = CuptiTracerEventType::ThreadMarkerRange;
+        it->second->end_time_ns = event.end_time_ns;
+        it->second->graph_id = 0;
+        event = std::move(*it->second);
+        nvtx_markers_.erase(it);
+        return true;  // The event is merged for further processing.
+      } else {
+        LOG_IF(ERROR, ++num_unmatched_nvtx_marker_end_ < 100)
+            << "Unmatched nvtx thread range end marker id: " << marker_id;
+      }
+    }
+    // No merged event is generated, return false.
+    return false;
+  }
 
   // Set the all XLines of specified XPlane to starting walltime.
   // Events time in both host and device planes are CUTPI timestamps.
@@ -750,6 +893,8 @@ class CuptiTraceCollectorImpl : public CuptiTraceCollector {
   }
 
   absl::FixedArray<PerDeviceCollector> per_device_collector_;
+  absl::flat_hash_map<uint32_t, std::unique_ptr<CuptiTracerEvent>>
+      nvtx_markers_;
 
   CuptiTraceCollectorImpl(const CuptiTraceCollectorImpl&) = delete;
   void operator=(const CuptiTraceCollectorImpl&) = delete;

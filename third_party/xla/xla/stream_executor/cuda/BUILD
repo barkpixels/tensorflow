@@ -13,7 +13,9 @@ load(
 load("//xla/tests:build_defs.bzl", "xla_test")
 load(
     "//xla/tsl:tsl.bzl",
+    # copybara:comment_begin
     "if_cuda_tools",
+    # copybara:comment_end
     "if_google",
     "if_nccl",
     "if_windows",
@@ -164,24 +166,6 @@ xla_test(
     ],
 )
 
-# Buildozer can not remove dependencies inside select guards, so we have to use
-# an intermediate target.
-cc_library(
-    name = "ptxas_wrapper",
-    data = if_cuda_tools(
-        ["@cuda_nvcc//:ptxas"],
-        [],
-    ),
-)
-
-cc_library(
-    name = "nvlink_wrapper",
-    data = if_cuda_tools(
-        ["@cuda_nvcc//:nvlink"],
-        [],
-    ),
-)
-
 cc_library(
     name = "cuda_context",
     srcs = ["cuda_context.cc"],
@@ -283,7 +267,7 @@ xla_test(
     tags = ["cuda-only"],
     deps = [
         ":cuda_collectives",
-        "//xla/service/gpu/runtime:nccl_api",
+        "//xla/backends/gpu/collectives:gpu_collectives",
         "//xla/stream_executor:platform",
         "//xla/stream_executor:platform_manager",
         "//xla/stream_executor:stream_executor_h",
@@ -408,6 +392,32 @@ cc_library(
         "@local_tsl//tsl/platform:tensor_float_32_utils",
     ]),
     alwayslink = True,
+)
+
+cc_library(
+    name = "cuda_solver_context",
+    srcs = ["cuda_solver_context.cc"],
+    hdrs = ["cuda_solver_context.h"],
+    tags = [
+        "cuda-only",
+        "gpu",
+    ],
+    deps = [
+        "//xla:comparison_util",
+        "//xla:util",
+        "//xla:xla_data_proto_cc",
+        "//xla/stream_executor:blas",
+        "//xla/stream_executor:device_memory",
+        "//xla/stream_executor:gpu_solver_context",
+        "//xla/stream_executor:stream",
+        "//xla/tsl/cuda:cusolver",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_tsl//tsl/platform:errors",
+        "@local_tsl//tsl/platform:logging",
+    ],
 )
 
 cc_library(
@@ -598,6 +608,7 @@ cc_library(
     deps = [
         "//xla/stream_executor:kernel_spec",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
     ],
 )
 
@@ -696,6 +707,7 @@ xla_cc_test(
     deps = [
         ":ptx_compiler_helpers",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest_main",
         "@local_tsl//tsl/platform:status_matchers",
         "@local_tsl//tsl/platform:test",
@@ -1022,6 +1034,7 @@ cc_library(
         "//xla/stream_executor/gpu:scoped_activate_context",
         "//xla/tsl/cuda",  # buildcleaner: keep
         "//xla/tsl/cuda:cudart",  # buildcleaner: keep
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
@@ -1369,6 +1382,7 @@ cc_library(
         "//xla/stream_executor:device_description",
         "//xla/stream_executor:semantic_version",
         "//xla/stream_executor/gpu:gpu_asm_opts",
+        "//xla/tsl/platform:subprocess",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",
@@ -1388,7 +1402,6 @@ cc_library(
         "@local_tsl//tsl/platform:regexp",
         "@local_tsl//tsl/platform:status",
         "@local_tsl//tsl/platform:statusor",
-        "@local_tsl//tsl/platform:subprocess",
     ],
 )
 
@@ -1505,6 +1518,7 @@ cc_library(
         ":compilation_provider",
         "//xla/stream_executor:device_description",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest",
     ],
@@ -1775,6 +1789,7 @@ xla_cc_test(
         ":mock_compilation_provider",
         "//xla/stream_executor:device_description",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest_main",
         "@local_tsl//tsl/platform:status_matchers",
         "@local_tsl//tsl/platform:statusor",
