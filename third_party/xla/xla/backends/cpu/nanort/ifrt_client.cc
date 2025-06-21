@@ -32,7 +32,6 @@ limitations under the License.
 #include "absl/base/attributes.h"
 #include "absl/base/call_once.h"
 #include "absl/base/dynamic_annotations.h"
-#include "absl/base/nullability.h"
 #include "absl/base/optimization.h"
 #include "absl/container/btree_map.h"
 #include "absl/container/inlined_vector.h"
@@ -765,7 +764,7 @@ class NanoExecutable final
       return InvalidArgument("NanoRT requires an HloProgram");
     }
     XlaComputation computation;
-    TF_RETURN_IF_ERROR(MlirToXlaComputation(xla_program->mlir_module,
+    TF_RETURN_IF_ERROR(MlirToXlaComputation(xla_program->mlir_module(),
                                             computation, false, true, false));
     TF_ASSIGN_OR_RETURN(auto nano_executable,
                         client->nano_client()->Compile(computation));
@@ -1006,7 +1005,7 @@ class NanoExecutable final
       const ProgramShape& program_shape, const XlaComputation& computation) {
     const auto& result_shape = program_shape.result();
 
-    int output_id = computation.proto().computations(0).root_id();
+    int64_t output_id = computation.proto().computations(0).root_id();
 
     std::vector<OpSharding> shardings(
         (result_shape.IsTuple() ? result_shape.tuple_shapes().size() : 1));

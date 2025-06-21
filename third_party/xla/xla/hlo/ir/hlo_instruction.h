@@ -1640,7 +1640,8 @@ class HloInstruction {
   // Returns the sharding applied to this operator.
   // REQUIRES: has_sharding() is true.
   const HloSharding& sharding() const {
-    CHECK(has_sharding());
+    CHECK(has_sharding()) << "Sharding instruction expected for: "
+                          << ToString();
     return *sharding_;
   }
   std::shared_ptr<const HloSharding> sharding_ptr() const { return sharding_; }
@@ -1891,7 +1892,7 @@ class HloInstruction {
     return it.second;
   }
 
-  size_t erase_frontend_attribute(const std::string& key) {
+  size_t erase_frontend_attribute(absl::string_view key) {
     return mutable_rare()->frontend_attributes.mutable_map()->erase(key);
   }
 
@@ -2106,9 +2107,6 @@ class HloInstruction {
 
   // Delegates to HloReshapeInstruction::inferred_dimension.
   int64_t inferred_dimension() const;
-
-  // Returns whether this instruction does a rank-2 transposition.
-  bool IsRank2Transpose() const;
 
   // Delegates to HloSliceInstruction::slice_start.
   int64_t slice_starts(int64_t dimension) const;
@@ -2444,7 +2442,7 @@ class HloInstruction {
   };
 
   // Change instruction's name to have a given suffix.
-  void AddSuffixToInstructionName(const absl::string_view suffix);
+  void AddSuffixToInstructionName(absl::string_view suffix);
 
  private:
   friend class HloComputation;

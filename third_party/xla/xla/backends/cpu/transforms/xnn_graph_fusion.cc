@@ -39,9 +39,9 @@ FusionDecision XnnGraphFusion::ShouldFuse(HloInstruction* consumer,
 
   HloInstruction* producer = consumer->mutable_operand(operand_index);
   if (!(producer->opcode() == HloOpcode::kParameter ||
-        producer->opcode() == HloOpcode::kConstant || IsOpSupported(producer)))
+        IsOpSupported(producer))) {
     return FusionDecision::Forbid("Unsupported producer");
-
+  }
   return FusionDecision::Allow();
 }
 
@@ -64,20 +64,19 @@ HloInstruction* XnnGraphFusion::Fuse(HloInstruction* producer,
   return fusion;
 }
 
-bool XnnGraphFusion::IsOpSupported(HloInstruction* instr) const {
-  if (!XnnDatatype(instr->shape().element_type()).ok()) {
+bool XnnGraphFusion::IsOpSupported(const HloInstruction* instr) const {
+  if (!IsLayoutSupportedByXnn(instr->shape())) {
     return false;
   }
-
-  switch (instr->opcode()) {
-    case HloOpcode::kAdd:
-    case HloOpcode::kSubtract:
-    case HloOpcode::kMultiply:
-      return true;
-    default:
-      return false;
+  if (instr->IsConstant()) {
+    return IsConstantSupportedByXnn(instr);
   }
+  if (instr->IsElementwise()) {
+    return IsElementwiseOpSupportedByXnn(instr);
+  }
+  return false;
 }
+
 bool XnnGraphFusion::IsXnnGraphFusion(const HloInstruction* instr) const {
   if (instr->opcode() != HloOpcode::kFusion) {
     return false;

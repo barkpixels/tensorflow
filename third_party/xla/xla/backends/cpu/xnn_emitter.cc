@@ -48,32 +48,6 @@ using TensorIdMap = absl::flat_hash_map<const HloInstruction*, uint32_t>;
 // XLA <-> XNNPACK type conversion library.
 //===----------------------------------------------------------------------===//
 
-static absl::StatusOr<xnn_unary_operator> XnnUnaryOperator(
-    const HloOpcode& opcode) {
-  switch (opcode) {
-    case HloOpcode::kConvert:
-      return xnn_unary_convert;
-    default:
-      return InvalidArgument("Unsupported XNNPACK unary operator: %s",
-                             HloOpcodeString(opcode));
-  }
-}
-
-static absl::StatusOr<xnn_binary_operator> XnnBinaryOperator(
-    const HloOpcode& opcode) {
-  switch (opcode) {
-    case HloOpcode::kAdd:
-      return xnn_binary_add;
-    case HloOpcode::kMultiply:
-      return xnn_binary_multiply;
-    case HloOpcode::kSubtract:
-      return xnn_binary_subtract;
-    default:
-      return InvalidArgument("Unsupported XNNPACK binary operator: %s",
-                             HloOpcodeString(opcode));
-  }
-}
-
 static std::vector<size_t> XnnDimensions(const Shape& shape) {
   std::vector<size_t> dims;
   for (auto& dim : shape.dimensions()) {
@@ -202,8 +176,12 @@ static absl::StatusOr<uint32_t> DefineBinaryOp(xnn_subgraph_t subgraph,
   xnn_binary_params params = {-std::numeric_limits<float>::infinity(),
                               std::numeric_limits<float>::infinity()};
 
+  // In XLA, broadcasts are explicit ops, allowing XNNPACK to assume there is no
+  // broadcasting in the elementwise operation itself, which simplifies data
+  // dependencies.
+  const uint32_t flags = XNN_FLAG_NO_BROADCAST;
   XNN_RETURN_IF_ERROR(xnn_define_binary(subgraph, binary_op, &params, lhs, rhs,
-                                        out, /*flags=*/0));
+                                        out, /*flags=*/flags));
 
   return out;
 }
@@ -217,7 +195,7 @@ static absl::StatusOr<uint32_t> DefineBatchMatMul(xnn_subgraph_t subgraph,
   const Shape& rhs_shape = instr->operand(1)->shape();
   TF_ASSIGN_OR_RETURN(
       bool is_supported,
-      IsXnnDotSupported(dnums, lhs_shape, rhs_shape, instr->shape()));
+      IsDotSupportedByXnn(dnums, lhs_shape, rhs_shape, instr->shape()));
 
   if (!is_supported) {
     if (subgraph != nullptr) XNN_LOG_IF_ERROR(xnn_delete_subgraph(subgraph));
@@ -236,12 +214,17 @@ static absl::StatusOr<uint32_t> DefineBatchMatMul(xnn_subgraph_t subgraph,
   VLOG(3) << absl::StreamFormat("  tensors: lhs=%d, rhs=%d, out=%d", lhs, rhs,
                                 out);
 
+  // In XLA, broadcasts are explicit ops, allowing XNNPACK to assume there is no
+  // broadcasting in the elementwise operation itself, which simplifies data
+  // dependencies.
+  uint32_t flags = XNN_FLAG_NO_BROADCAST;
   // IsXnnDotSupported has verified that rhs_contracting_dimensions has size 1.
-  bool rhs_canonical =
-      dnums.rhs_contracting_dimensions(0) == dnums.rhs_batch_dimensions_size();
-  XNN_RETURN_IF_ERROR(xnn_define_batch_matrix_multiply(
-      subgraph, lhs, rhs, out,
-      /*flags=*/rhs_canonical ? 0 : XNN_FLAG_TRANSPOSE_B));
+  if (dnums.rhs_contracting_dimensions(0) !=
+      dnums.rhs_batch_dimensions_size()) {
+    flags |= XNN_FLAG_TRANSPOSE_B;
+  }
+  XNN_RETURN_IF_ERROR(xnn_define_batch_matrix_multiply(subgraph, lhs, rhs, out,
+                                                       /*flags=*/flags));
 
   return out;
 }
@@ -266,27 +249,48 @@ static absl::StatusOr<xnn_subgraph_t> EmitXnnSubgraph(
   auto instructions = computation->MakeInstructionPostOrder();
 
   for (const HloInstruction* instr : instructions) {
+    if (!IsLayoutSupportedByXnn(instr->shape())) {
+      XNN_LOG_IF_ERROR(xnn_delete_subgraph(subgraph));
+      return InvalidArgument(
+          "Instruction with unsupported layout in XNN fusion: %s",
+          instr->ToString());
+    }
+
+    if (instr->IsConstant()) {
+      if (!IsConstantSupportedByXnn(instr)) {
+        XNN_LOG_IF_ERROR(xnn_delete_subgraph(subgraph));
+        return InvalidArgument(
+            "Unsupported constant instruction in XNN fusion: %s",
+            instr->ToString());
+      }
+      TF_ASSIGN_OR_RETURN(tensor_ids[instr],
+                          DefineConstant(subgraph, literals, instr));
+      continue;
+    }
+
+    if (instr->IsElementwise()) {
+      if (!IsElementwiseOpSupportedByXnn(instr)) {
+        XNN_LOG_IF_ERROR(xnn_delete_subgraph(subgraph));
+        return InvalidArgument(
+            "Unsupported elementwise instruction in XNN fusion: %s",
+            instr->ToString());
+      }
+      if (instr->operand_count() == 1) {
+        TF_ASSIGN_OR_RETURN(tensor_ids[instr],
+                            DefineUnaryOp(subgraph, tensor_ids, instr));
+      } else if (instr->operand_count() == 2) {
+        TF_ASSIGN_OR_RETURN(tensor_ids[instr],
+                            DefineBinaryOp(subgraph, tensor_ids, instr));
+      } else {
+        CHECK(false) << "Unexpected operand count " << instr->operand_count();
+      }
+      continue;
+    }
+
     switch (instr->opcode()) {
       case HloOpcode::kParameter: {
         TF_ASSIGN_OR_RETURN(tensor_ids[instr],
                             DefineParameter(subgraph, instr));
-      } break;
-
-      case HloOpcode::kConstant: {
-        TF_ASSIGN_OR_RETURN(tensor_ids[instr],
-                            DefineConstant(subgraph, literals, instr));
-      } break;
-
-      case HloOpcode::kConvert: {
-        TF_ASSIGN_OR_RETURN(tensor_ids[instr],
-                            DefineUnaryOp(subgraph, tensor_ids, instr));
-      } break;
-
-      case HloOpcode::kAdd:
-      case HloOpcode::kSubtract:
-      case HloOpcode::kMultiply: {
-        TF_ASSIGN_OR_RETURN(tensor_ids[instr],
-                            DefineBinaryOp(subgraph, tensor_ids, instr));
       } break;
 
       case HloOpcode::kDot: {
