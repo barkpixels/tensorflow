@@ -23,6 +23,7 @@ filegroup(
     srcs = [
         "convolution_thunk_f16.cc",
         "convolution_thunk_f32.cc",
+        "rng_state_lib.cc",
     ],
     visibility = internal_visibility([":friends"]),
 )
@@ -31,6 +32,8 @@ filegroup(
     name = "runtime_hdrs",
     srcs = [
         "convolution_thunk_internal.h",
+        "kernel_c_api.h",
+        "rng_state_lib.h",
         "work_queue.h",
     ],
     visibility = internal_visibility([":friends"]),
@@ -1142,8 +1145,6 @@ cc_library(
         "//xla:xla_data_proto_cc",
         "//xla/runtime:buffer_use",
         "//xla/service:buffer_assignment",
-        "//xla/service/cpu:runtime_fft",
-        "//xla/service/cpu:runtime_single_threaded_fft",
         "//xla/stream_executor:device_memory",
         "//xla/stream_executor:stream_executor_h",
         "//xla/tsl/concurrency:async_value",
@@ -1152,6 +1153,8 @@ cc_library(
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
+        "@ducc//:fft_wrapper",
+        "@eigen_archive//:eigen3",
     ],
 )
 

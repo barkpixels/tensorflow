@@ -16,17 +16,6 @@ package_group(
 )
 
 cc_library(
-    name = "autotuner",
-    hdrs = ["autotuner.h"],
-    deps = [
-        "//xla/hlo/ir:hlo",
-        "//xla/runtime:thunk",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/time",
-    ],
-)
-
-cc_library(
     name = "device_spec",
     hdrs = ["device_spec.h"],
     deps = [
@@ -86,6 +75,7 @@ cc_library(
     hdrs = ["kernel_spec.h"],
     deps = [
         "//xla/runtime:work_cluster",
+        "//xla/runtime:work_dimensions",
         "//xla/runtime:work_group",
         "//xla/runtime:work_item",
         "//xla/service:buffer_assignment",
@@ -193,6 +183,7 @@ cc_library(
     hdrs = ["math_lib.h"],
     deps = [
         "//xla:xla_data_proto_cc",
+        "//xla/codegen/math:exp",
         "//xla/codegen/math:ldexp",
         "//xla/codegen/math:string_interner",
         "//xla/codegen/math:vec_name_mangler",
@@ -220,5 +211,6 @@ cc_library(
     deps = [
         "//xla/hlo/utils:hlo_traversal",
         "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/types:span",
     ],
 )

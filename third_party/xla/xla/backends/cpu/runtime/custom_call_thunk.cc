@@ -181,12 +181,14 @@ static absl::StatusOr<CustomCallThunk::CustomCallTarget> ToCustomCallTarget(
       return InvalidArgument(
           "Custom call API version `API_VERSION_ORIGINAL` is not supported "
           "by XLA:CPU. Prefer https://docs.jax.dev/en/latest/ffi.html. It "
-          "will be fully removed in November 2025.");
+          "will be fully removed in November 2025. Custom call target: %s",
+          target_name);
 #else
       LOG(ERROR)
           << "Custom call API version `API_VERSION_ORIGINAL` is not supported "
              "by XLA:CPU. Prefer https://docs.jax.dev/en/latest/ffi.html. It "
-             "will be fully removed in November 2025.";
+             "will be fully removed in November 2025. Custom call target: "
+          << target_name;
 #endif
 
       using v1_signature = void (*)(void* /*out*/, const void** /*in*/);
@@ -195,8 +197,23 @@ static absl::StatusOr<CustomCallThunk::CustomCallTarget> ToCustomCallTarget(
         auto fn = reinterpret_cast<v1_signature>(target);
         fn(out, in);
       };
-
     case CustomCallApiVersion::API_VERSION_STATUS_RETURNING:
+#ifdef PLATFORM_GOOGLE
+      return InvalidArgument(
+          "Custom call API version `API_VERSION_STATUS_RETURNING` is not "
+          "supported by XLA:CPU. Prefer "
+          "https://docs.jax.dev/en/latest/ffi.html. It will be fully removed "
+          "in November 2025. Custom call target: %s",
+          target_name);
+#else
+      LOG(ERROR)
+          << "Custom call API version `API_VERSION_STATUS_RETURNING` is not "
+             "supported by XLA:CPU. Prefer "
+             "https://docs.jax.dev/en/latest/ffi.html. It will be fully "
+             "removed in November 2025. Custom call target: "
+          << target_name;
+#endif
+
       using v2_signature = void (*)(void* /*out*/, const void** /*in*/,
                                     XlaCustomCallStatus* /*status*/);
       return [target](void* out, const void** in, const char* opaque,
@@ -204,21 +221,7 @@ static absl::StatusOr<CustomCallThunk::CustomCallTarget> ToCustomCallTarget(
         auto fn = reinterpret_cast<v2_signature>(target);
         fn(out, in, status);
       };
-
     case CustomCallApiVersion::API_VERSION_STATUS_RETURNING_UNIFIED:
-#ifdef PLATFORM_GOOGLE
-      return InvalidArgument(
-          "Custom call API version `API_VERSION_STATUS_RETURNING_UNIFIED` is "
-          "not supported by XLA:CPU. Prefer "
-          "https://docs.jax.dev/en/latest/ffi.html. It "
-          "will be fully removed in November 2025.");
-#else
-      LOG(ERROR)
-          << "Custom call API version `API_VERSION_STATUS_RETURNING_UNIFIED` "
-             "is not supported by XLA:CPU. Prefer "
-             "https://docs.jax.dev/en/latest/ffi.html. It "
-             "will be fully removed in November 2025.";
-#endif
       using v3_signature =
           void (*)(void* /*out*/, const void** /*in*/, const char* /*opaque*/,
                    size_t /*opaque_len*/, XlaCustomCallStatus* /*status*/);
